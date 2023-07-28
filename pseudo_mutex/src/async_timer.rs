@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Poll,Context};
 
+///Symple asynchronous struct implementing a sleep function by comparing current time to a target on each poll.
 pub struct AsyncTimeout
 {
     target_time : Instant
@@ -20,7 +21,7 @@ impl AsyncTimeout
         AsyncTimeout{target_time : Instant::now() + Duration::from_millis(millis)}
     }
 
-    pub fn sleep_µs(micros : u64) -> AsyncTimeout
+    pub fn sleep_us(micros : u64) -> AsyncTimeout
     {
         AsyncTimeout{target_time : Instant::now() + Duration::from_micros(micros)}
     }
