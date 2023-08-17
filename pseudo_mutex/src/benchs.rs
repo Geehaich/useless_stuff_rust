@@ -63,7 +63,7 @@ async fn mut_work(m : Arc::<PseudoMutex<u32>>, wait : u64)
     async_timer::AsyncTimeout::sleep_ms(wait+ rand::random::<u64>()%60).await;
     let mut  guard = m.lock().await;
     
-    *guard +=rand::random::<u32>()%10;
+    *guard +=rand::random::<u32>()%10+1;
     *guard %= 15000;
     m.release();
 }
@@ -73,7 +73,7 @@ async fn os_mut_work(m : Arc::<std::sync::Mutex<u32>>, wait : u64)
 {
     async_timer::AsyncTimeout::sleep_ms(wait+ rand::random::<u64>()%60).await;
     let mut  guard = m.lock().unwrap();
-    *guard +=rand::random::<u32>()%10;
+    *guard +=rand::random::<u32>()%10+1;
     *guard %= 15000;
 }
 
@@ -91,6 +91,8 @@ async fn  as_main(metroid : Arc::<PseudoMutex<u32>>, n_tasks : u32)
 
 }
 
+
+#[allow(dead_code)]
 async fn  os_main(metroid : Arc::<std::sync::Mutex<u32>>, n_tasks : u32)
 {
 
@@ -104,7 +106,7 @@ async fn  os_main(metroid : Arc::<std::sync::Mutex<u32>>, n_tasks : u32)
 
 }
 
-
+#[allow(dead_code)]
 pub fn bench_as_vs_os (threads : u32 , tasks : u32) -> (u128 , u128)
 {
     let mutax = Arc::new(PseudoMutex::<u32>::new(0));
@@ -149,12 +151,17 @@ async fn verbose_mut_work(m : Arc::<PseudoMutex<u32>>, wait : u64, thread : u32,
     async_timer::AsyncTimeout::sleep_ms(wait+ rand::random::<u64>()%60).await;
     let mut  guard = m.lock().await;
     println!("thread {} , task {} acquired mutex, current value {}", thread,task,*guard);
-    *guard +=rand::random::<u32>()%10;
+    *guard +=rand::random::<u32>()%10+1;
     *guard %= 15000;
-    async_timer::AsyncTimeout::sleep_ms(wait).await;
-    println!("work done");
 
-    //m.release();
+    async_timer::AsyncTimeout::sleep_ms(wait).await;
+
+    println!("tout");
+
+
+    m.release();
+
+
 }
 
 async fn  verbose_as_main(metroid : Arc::<PseudoMutex<u32>>,n_thread : u32, n_tasks : u32, wait : u64)
