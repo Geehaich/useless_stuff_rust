@@ -7,7 +7,7 @@ use crate::PseudoMutex;
 
 pub mod async_timer
 {
-///Symple asynchronous struct implementing a sleep function by comparing current time to a target on each poll.
+///Trivial and unoptimized implementation of an asynchronous timer, used for benchmarking pseudo mutexes
 /// 
 use std::time::{Instant,Duration};
 use std::future::Future;
@@ -57,7 +57,10 @@ impl Future for AsyncTimeout
 }
 }
 
+
+
 #[allow(dead_code)]
+/// Function called by every task in the queue
 async fn mut_work(m : Arc::<PseudoMutex<u32>>, wait : u64)
 {
     async_timer::AsyncTimeout::sleep_ms(wait+ rand::random::<u64>()%60).await;
@@ -69,6 +72,7 @@ async fn mut_work(m : Arc::<PseudoMutex<u32>>, wait : u64)
 }
 
 #[allow(dead_code)]
+//equivalent to mut_work using OS mutexes
 async fn os_mut_work(m : Arc::<std::sync::Mutex<u32>>, wait : u64)
 {
     async_timer::AsyncTimeout::sleep_ms(wait+ rand::random::<u64>()%60).await;
@@ -78,6 +82,7 @@ async fn os_mut_work(m : Arc::<std::sync::Mutex<u32>>, wait : u64)
 }
 
 #[allow(dead_code)]
+/// asynchronous function spawning n_tasks asynchronous tasks
 async fn  as_main(metroid : Arc::<PseudoMutex<u32>>, n_tasks : u32)
 {
 
@@ -93,6 +98,7 @@ async fn  as_main(metroid : Arc::<PseudoMutex<u32>>, n_tasks : u32)
 
 
 #[allow(dead_code)]
+// equivalent to as_main using OS mutexes instead of PseudoMutex instances
 async fn  os_main(metroid : Arc::<std::sync::Mutex<u32>>, n_tasks : u32)
 {
 
@@ -107,6 +113,8 @@ async fn  os_main(metroid : Arc::<std::sync::Mutex<u32>>, n_tasks : u32)
 }
 
 #[allow(dead_code)]
+// benchmark function. Takes a mutex owning a u32, increments it using asynchronous tasks across
+// multiple threads, and returns computation times of this task and an equivalent relying on OS mutexes.
 pub fn bench_as_vs_os (threads : u32 , tasks : u32) -> (u128 , u128)
 {
     let mutax = Arc::new(PseudoMutex::<u32>::new(0));
@@ -145,7 +153,7 @@ pub fn bench_as_vs_os (threads : u32 , tasks : u32) -> (u128 , u128)
 
 
 
-
+// same as mut_work with printouts
 async fn verbose_mut_work(m : Arc::<PseudoMutex<u32>>, wait : u64, thread : u32, task : u32)
 {
     async_timer::AsyncTimeout::sleep_ms(wait+ rand::random::<u64>()%60).await;
