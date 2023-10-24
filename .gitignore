@@ -1,1 +1,5 @@
 /target
+/.devcontainer/
+/.vscode/
+/pseudo_mutex/target/
+/pseudo_mutex/Cargo.lock
