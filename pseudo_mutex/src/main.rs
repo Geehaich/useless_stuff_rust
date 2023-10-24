@@ -16,7 +16,7 @@ struct PseudoMutex<T>
     task_queue : UnsafeCell::<VecDeque::<Waker>>,
     data : UnsafeCell<T>
 }
-unsafe impl<T> Send for PseudoMutex<T> {}
+unsafe impl<T> Send for PseudoMutex<T> {} //justification : UnsafeCell requires unsafe implementations of Send and Sync
 unsafe impl<T> Sync for PseudoMutex<T> {}
 
 
@@ -31,10 +31,10 @@ impl<T> PseudoMutex<T>
         let deq = VecDeque::<Waker>::with_capacity(cap);
         PseudoMutex::<T>
         {
-            bool_locked : AtomicBool::new(false),
-            can_queue : AtomicBool::new(true),
-            task_queue : UnsafeCell::new(deq),
-            data: UnsafeCell::<T>::new(resource)
+            bool_locked : AtomicBool::new(false), //resource lock
+            can_queue : AtomicBool::new(true), //deque access lock
+            task_queue : UnsafeCell::new(deq), //waker deque. UnsafeCell justified by need to mutate self across tasks through immutable references.
+            data: UnsafeCell::<T>::new(resource) // Actual resource. UnsafeCell justified because Mozilla does it
          }
         
         
@@ -58,9 +58,9 @@ impl<T> PseudoMutex<T>
 
 
     /// pushes a Waker linked to a FutureLock to the front of the queue. Wakes it if it's the only one there, giving the resource to the task.
-    fn queue_waker(& self, wk : Waker)
+    fn queue_waker(&self, wk : Waker)
     {
-        unsafe
+        unsafe //justification : multiple futurelocks share refs to self (have to be immutable) but each needs to mutate self to update queue
         {
 
             let queueref = &mut *self.task_queue.get();
@@ -81,7 +81,8 @@ impl<T> PseudoMutex<T>
     fn release(&self) -> ()
     {
         if self.bool_locked.load(Ordering::Relaxed)==false {return;} //in case of double call (manual + release from dropping MutexGuard)
-        unsafe
+        
+        unsafe //justification : same as queue_waker
         {
             let queueref = &mut *self.task_queue.get();
             while self.can_queue.compare_exchange(true,false, Ordering::Relaxed, Ordering::Relaxed).is_err()
@@ -178,13 +179,13 @@ impl<T> Deref for PseudoGuard<'_,T>
     type Target = T;
     fn deref(&self) -> &Self::Target 
     {
-        unsafe{&*self.lock.data.get()}
+        unsafe{&*self.lock.data.get()} //justification : self.lock.data is UnsafeCell, need unsafeblock to access
     }
 }
 
 impl<T> DerefMut for PseudoGuard<'_,T>{
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.lock.data.get()}
+        unsafe { &mut *self.lock.data.get()} //justification : same as Deref
     }
 }
 
