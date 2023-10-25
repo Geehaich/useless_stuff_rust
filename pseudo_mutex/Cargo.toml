@@ -1,11 +1,11 @@
 [package]
-name = "pseudo-mutex"
+name = "magetex"
 version = "0.1.0"
 edition = "2021"
 keywords = ["mutex","async","realtime"]
 authors = ["Geehaich", "CendreQuasar540"]
 readme = "readme.md"
 
-[dependencies]
+[dev-dependencies]
 futures = "0.3"
 rand = "*"

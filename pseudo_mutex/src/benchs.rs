@@ -1,4 +1,4 @@
-use crate::PseudoMutex;
+use crate::Mutex;
 use futures::executor::block_on;
 use std::sync::Arc;
 
@@ -49,7 +49,7 @@ pub mod async_timer {
 
 #[allow(dead_code)]
 /// Function called by every task in the queue
-async fn mut_work(m: Arc<PseudoMutex<u32>>, wait: u64) {
+async fn mut_work(m: Arc<Mutex<u32>>, wait: u64) {
     async_timer::AsyncTimeout::sleep_ms(wait + rand::random::<u64>() % 60).await;
     let mut guard = m.lock().await;
 
@@ -69,7 +69,7 @@ async fn os_mut_work(m: Arc<std::sync::Mutex<u32>>, wait: u64) {
 
 #[allow(dead_code)]
 /// asynchronous function spawning n_tasks asynchronous tasks
-async fn as_main(metroid: Arc<PseudoMutex<u32>>, n_tasks: u32) {
+async fn as_main(metroid: Arc<Mutex<u32>>, n_tasks: u32) {
     let mut futs = Vec::<_>::new();
 
     for _i in 0..n_tasks {
@@ -93,12 +93,12 @@ async fn os_main(metroid: Arc<std::sync::Mutex<u32>>, n_tasks: u32) {
 // benchmark function. Takes a mutex owning a u32, increments it using asynchronous tasks across
 // multiple threads, and returns computation times of this task and an equivalent relying on OS mutexes.
 pub fn bench_as_vs_os(threads: u32, tasks: u32) -> (u128, u128) {
-    let mutax = Arc::new(PseudoMutex::<u32>::new(0));
+    let mutax = Arc::new(Mutex::<u32>::new(0));
     let mut handvec = Vec::<_>::new();
 
     let a = std::time::Instant::now();
     for _i in 0..threads {
-        let r: Arc<PseudoMutex<u32>> = mutax.clone();
+        let r: Arc<Mutex<u32>> = mutax.clone();
         handvec.push(std::thread::spawn(move || block_on(as_main(r, tasks))));
     }
 
@@ -127,7 +127,7 @@ pub fn bench_as_vs_os(threads: u32, tasks: u32) -> (u128, u128) {
 }
 
 // same as mut_work with printouts
-async fn verbose_mut_work(m: Arc<PseudoMutex<u32>>, wait: u64, thread: u32, task: u32) {
+async fn verbose_mut_work(m: Arc<Mutex<u32>>, wait: u64, thread: u32, task: u32) {
     async_timer::AsyncTimeout::sleep_ms(wait + rand::random::<u64>() % 60).await;
     let mut guard = m.lock().await;
     println!(
@@ -144,7 +144,7 @@ async fn verbose_mut_work(m: Arc<PseudoMutex<u32>>, wait: u64, thread: u32, task
     m.release();
 }
 
-async fn verbose_as_main(metroid: Arc<PseudoMutex<u32>>, n_thread: u32, n_tasks: u32, wait: u64) {
+async fn verbose_as_main(metroid: Arc<Mutex<u32>>, n_thread: u32, n_tasks: u32, wait: u64) {
     let mut futs = Vec::<_>::new();
 
     for _i in 0..n_tasks {
@@ -155,12 +155,12 @@ async fn verbose_as_main(metroid: Arc<PseudoMutex<u32>>, n_thread: u32, n_tasks:
 
 #[allow(dead_code)]
 pub fn bench_tasks_threads(threads: u32, tasks: u32, wait: u64) {
-    let mutax = Arc::new(PseudoMutex::<u32>::new(0));
+    let mutax = Arc::new(Mutex::<u32>::new(0));
     let mut handvec = Vec::<_>::new();
 
     let _ = std::time::Instant::now();
     for _i in 0..threads {
-        let r: Arc<PseudoMutex<u32>> = mutax.clone();
+        let r: Arc<Mutex<u32>> = mutax.clone();
         handvec.push(std::thread::spawn(move || {
             block_on(verbose_as_main(r, _i, tasks, wait))
         }));
