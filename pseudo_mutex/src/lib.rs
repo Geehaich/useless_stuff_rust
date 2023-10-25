@@ -1,9 +1,12 @@
 use core::future::Future;
-use std::cell::UnsafeCell;
+use core::cell::UnsafeCell;
 use std::collections::VecDeque;
-use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll, Waker};
+use std::error::Error;
+use core::ops::{Deref, DerefMut};
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::task::{Context, Poll, Waker};
+
+use std::sync::Mutex as Sync_Mutex;
 
 const DEFAULT_SIZE: usize = 16;
 
@@ -18,6 +21,9 @@ pub struct Mutex<T> {
 /// Because UnsafeCell requires unsafe implementations of Send and Sync
 unsafe impl<T> Send for Mutex<T> {}
 unsafe impl<T> Sync for Mutex<T> {}
+
+
+
 
 /// Mutex: Utilization simillar to the std mutex. Can register multiple waker.
 #[allow(dead_code)]
@@ -49,6 +55,26 @@ impl<T> Mutex<T> {
     pub fn lock(&self) -> FutureLock<T> {
         FutureLock::new(self)
     }
+
+    pub fn try_lock(&self) -> Result<LockGuard<T>, LockError>
+    {
+        match self.bool_locked.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed) 
+        {
+            Ok(_) => Ok(LockGuard::<'_,T>::new(self)),
+            Err(_) => 
+            unsafe{
+                Err(LockError::new((*(self.task_queue.get())).len()))
+            }
+        }
+    }
+
+    pub fn sync_lock(&self, wait_granularity : u64 ) -> LockGuard<T>
+    {
+        while self.bool_locked.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+            std::thread::sleep( std::time::Duration::from_micros(wait_granularity)); }
+        LockGuard::<'_,T>::new(&self)
+    }
+
 
     /// Pushes a Waker linked to a FutureLock to the front of the queue. Wakes it if it's the only one there, giving the resource to the task.
     fn queue_waker(&self, wk: Waker) {
@@ -91,6 +117,39 @@ impl<T> Mutex<T> {
     }
 }
 
+
+impl<T> From<Sync_Mutex<T>> for Mutex<T>
+{
+    fn from(sync_mtx: Sync_Mutex<T>) -> Self {
+        let data = sync_mtx.into_inner().unwrap();
+        Mutex::new(data)
+    }
+}
+
+
+#[derive(Debug)]
+pub struct LockError //Simple error type for the try_error function
+{
+    n_tasks : usize
+}
+
+impl LockError
+{
+    pub fn new(tasks_ : usize) -> LockError {LockError { n_tasks: tasks_ }}
+}
+
+impl core::fmt::Display for LockError
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Error Locking Mutex, {} other tasks in queue", self.n_tasks)
+    }
+}
+
+impl Error for LockError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {None}
+}
+
+
 /// Futurelocks are an intermediary struct necessary to make the PseudoMutex locking asynchronous,
 /// we need an element implementing future to allow waiting for a PseudoGuard and collect references to the Waker used.
 /// They work by adding a reference to the current Waker to the PseudoMutex queue on the first poll
@@ -130,7 +189,7 @@ impl<'a, T> Future for FutureLock<'a, T> {
     }
 }
 
-///PseudoGuard is the equivalent of a Mutexguard, a struct used to access the data in a PseudoMutex which unlocks it on Drop.
+///LockGuard is the equivalent of a Mutexguard, a struct used to access the data in a PseudoMutex which unlocks it on Drop.
 pub struct LockGuard<'a, T> {
     lock: &'a Mutex<T>,
 }
@@ -142,6 +201,8 @@ impl<'a, T> LockGuard<'a, T> {
         LockGuard { lock: mtx }
     }
 }
+
+
 
 impl<T> Drop for LockGuard<'_, T> {
     /// Drop resource (release pseudo mutex)
@@ -184,3 +245,58 @@ fn single() {
 
     println!("Crate: {} OS: {}", r.0 / lim, r.1 / lim)
 }
+
+#[test]
+fn block_lock()  //test blocking access
+{
+    let mutax  = std::sync::Arc::new(Mutex::new(0));
+
+    let mut handles = vec![];
+
+    let N_THREADS = 25;
+    for i in 0..N_THREADS {
+        let data = std::sync::Arc::clone(&mutax);
+        handles.push(std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis((10*i)^113)); //scrambles thread access order
+            let mut guard = data.sync_lock(10);
+            *guard += i;
+            println!("thread {} has mtx",i);
+            println!("{}",*guard);
+            // the lock is unlocked here when `data` goes out of scope.
+        }));
+       }
+
+    for hand in handles { hand.join();}
+    
+
+
+}
+
+
+#[test]
+fn from_test() //test conversion from std mutex
+{
+    let mutex_os: Sync_Mutex<u64>  = Sync_Mutex::new(0);
+    let mutex_as : Mutex<u64> = Mutex::<u64>::from(mutex_os);
+    let marc = std::sync::Arc::new(mutex_as);
+
+    let mut handles = vec![];
+
+    let N_THREADS = 80;
+    for i in 0..N_THREADS {
+        let data = std::sync::Arc::clone(&marc);
+        handles.push(std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(i*3^113)); //scrambles thread access order
+            let mut guard = data.sync_lock(10);
+            *guard += i;
+            println!("thread {} has mtx",i);
+            // the lock is unlocked here when `data` goes out of scope.
+        }));
+       }
+
+    for hand in handles { hand.join();}
+    
+
+
+}
+
