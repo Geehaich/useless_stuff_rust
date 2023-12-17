@@ -9,6 +9,8 @@ use core::task::{Context, Poll, Waker};
 use std::sync::Mutex as Sync_Mutex;
 
 const DEFAULT_SIZE: usize = 16;
+const DEFAULT_YIELD: usize = 32;
+const DEFAULT_DURATION : u64 = 10;
 
 //PseudoMutex is an asynchronous equivalent to a Mutex using a Deque to keep track of tasks waiting on the resource.
 pub struct Mutex<T> {
@@ -21,8 +23,6 @@ pub struct Mutex<T> {
 /// Because UnsafeCell requires unsafe implementations of Send and Sync
 unsafe impl<T> Send for Mutex<T> {}
 unsafe impl<T> Sync for Mutex<T> {}
-
-
 
 
 /// Mutex: Utilization simillar to the std mutex. Can register multiple waker.
@@ -68,10 +68,25 @@ impl<T> Mutex<T> {
         }
     }
 
-    pub fn sync_lock(&self, wait_granularity : u64 ) -> LockGuard<T>
+    /// Attempt to lock a mutex by yielding thread. If it's take to much time, this function use default granularity time
+    pub fn sync_lock(&self) -> LockGuard<T>
     {
+        return self.sync_lock_with_time(DEFAULT_DURATION);
+    }
+
+    /// Attempt to lock a mutex by yielding thread. If it's take to much time, this function use time granularity in microseconds given in argument
+    pub fn sync_lock_with_time(&self, wait_granularity : u64 ) -> LockGuard<T>
+    {
+        let mut i = 0;
         while self.bool_locked.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed).is_err() {
-            std::thread::sleep( std::time::Duration::from_micros(wait_granularity)); }
+            if i < DEFAULT_YIELD {
+                std::thread::yield_now();
+                i += 1;
+            }
+            else { 
+                std::thread::sleep( std::time::Duration::from_micros(wait_granularity));
+            }
+        }
         LockGuard::<'_,T>::new(&self)
     }
 
@@ -196,13 +211,11 @@ pub struct LockGuard<'a, T> {
 
 impl<'a, T> LockGuard<'a, T> {
     #[allow(dead_code)]
-    /// Ctor, lock pseudo mutex given n argument
-    pub fn new(mtx: &'a Mutex<T>) -> LockGuard<'a, T> {
+    /// Ctor, lock pseudo mutex given n argument. Private ctor.
+    fn new(mtx: &'a Mutex<T>) -> LockGuard<'a, T> {
         LockGuard { lock: mtx }
     }
 }
-
-
 
 impl<T> Drop for LockGuard<'_, T> {
     /// Drop resource (release pseudo mutex)
@@ -253,12 +266,12 @@ fn block_lock()  //test blocking access
 
     let mut handles = vec![];
 
-    let N_THREADS = 25;
-    for i in 0..N_THREADS {
+    let n_threads = 25;
+    for i in 0..n_threads {
         let data = std::sync::Arc::clone(&mutax);
         handles.push(std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis((10*i)^113)); //scrambles thread access order
-            let mut guard = data.sync_lock(10);
+            let mut guard = data.sync_lock();
             *guard += i;
             println!("thread {} has mtx",i);
             println!("{}",*guard);
@@ -266,10 +279,7 @@ fn block_lock()  //test blocking access
         }));
        }
 
-    for hand in handles { hand.join();}
-    
-
-
+    for hand in handles { _ = hand.join();}
 }
 
 
@@ -282,21 +292,18 @@ fn from_test() //test conversion from std mutex
 
     let mut handles = vec![];
 
-    let N_THREADS = 80;
-    for i in 0..N_THREADS {
+    let n_threads = 80;
+    for i in 0..n_threads {
         let data = std::sync::Arc::clone(&marc);
         handles.push(std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(i*3^113)); //scrambles thread access order
-            let mut guard = data.sync_lock(10);
+            let mut guard = data.sync_lock();
             *guard += i;
             println!("thread {} has mtx",i);
             // the lock is unlocked here when `data` goes out of scope.
         }));
-       }
-
-    for hand in handles { hand.join();}
-    
-
-
+    }  
+    for hand in handles {
+        _ = hand.join(); 
+    }
 }
-
