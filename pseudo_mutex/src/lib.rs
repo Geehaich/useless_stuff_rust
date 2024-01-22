@@ -58,10 +58,10 @@ impl<T> Mutex<T> {
 
     pub fn try_lock(&self) -> Result<LockGuard<T>, LockError>
     {
-        match self.bool_locked.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed) 
+        match self.bool_locked.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
         {
             Ok(_) => Ok(LockGuard::<'_,T>::new(self)),
-            Err(_) => 
+            Err(_) =>
             unsafe{
                 Err(LockError::new((*(self.task_queue.get())).len()))
             }
@@ -83,7 +83,7 @@ impl<T> Mutex<T> {
                 std::thread::yield_now();
                 i += 1;
             }
-            else { 
+            else {
                 std::thread::sleep( std::time::Duration::from_micros(wait_granularity));
             }
         }
@@ -215,6 +215,12 @@ impl<'a, T> LockGuard<'a, T> {
     fn new(mtx: &'a Mutex<T>) -> LockGuard<'a, T> {
         LockGuard { lock: mtx }
     }
+
+    /// Return a reference to the internal object by calling Deref trait
+    /// Equivalent to `&*self`
+    fn as_ref(&self) -> &T {
+        &*self
+    }
 }
 
 impl<T> Drop for LockGuard<'_, T> {
@@ -240,7 +246,6 @@ impl<T> DerefMut for LockGuard<'_, T> {
         unsafe { &mut *self.lock.data.get() }
     }
 }
-
 
 #[cfg(test)]
 mod benchs;
@@ -302,8 +307,8 @@ fn from_test() //test conversion from std mutex
             println!("thread {} has mtx",i);
             // the lock is unlocked here when `data` goes out of scope.
         }));
-    }  
+    }
     for hand in handles {
-        _ = hand.join(); 
+        _ = hand.join();
     }
 }

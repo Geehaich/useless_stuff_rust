@@ -1,6 +1,7 @@
 use crate::Mutex;
 use futures::executor::block_on;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
+use futures_concurrency::prelude::*;
 
 pub mod async_timer {
     use std::future::Future;
@@ -169,4 +170,93 @@ pub fn bench_tasks_threads(threads: u32, tasks: u32, wait: u64) {
     for hand in handvec {
         let _ = hand.join();
     }
+}
+
+#[derive(Debug)]
+struct Schmilblick {
+    field1 : i64,
+    field2 : String,
+    field3 : (u128,bool),
+    field4 : Vec<usize>
+}
+
+impl Schmilblick {
+    pub fn new() -> Self {
+        Self {
+            field1 : 1,
+            field2 : String::from("foo"),
+            field3 : (2,true),
+            field4 : vec!(4,5,6)
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[tokio::test]
+async fn concurrency_test_single() {
+    let mtx = Arc::new(Mutex::new(Schmilblick::new()));
+
+    let lim: usize = 100000;
+    (
+        async {
+            for _i in 0..lim {
+                mtx.lock().await.field1 += 1;
+                std::thread::sleep(Duration::from_micros(500));
+            }
+        },
+        async {
+            for j in 0..lim {
+                let c = char::from_u32(j as u32 % 26 + 65).unwrap();
+                mtx.lock().await.field2.push(c);
+                std::thread::sleep(Duration::from_micros(500));
+            }
+        },
+        async {
+            for k in 0..lim {
+                mtx.lock().await.field4.push(k);
+                std::thread::sleep(Duration::from_micros(500));
+            }
+        }
+    ).join().await;
+    dbg!(mtx.lock().await.as_ref());
+}
+
+#[allow(dead_code)]
+#[tokio::test]
+async fn concurrency_test_mixed() {
+    let mtx = Arc::new(Mutex::new(Schmilblick::new()));
+
+    let lim: usize = 100000;
+    (
+        async {
+            for _i in 0..lim {
+                dbg!("Task A");
+                {
+                    let mut guard = mtx.lock().await;
+                    guard.field1 += 1;
+                    let sz = guard.field4.len() - 1;
+                    guard.field4[sz] = usize::MAX;
+                }
+            }
+        },
+        async {
+            for j in 0..lim {
+                dbg!("Task B");
+                let c = char::from_u32(j as u32 % 26 + 65).unwrap();
+                mtx.lock().await.field2.push(c);
+                mtx.lock().await.field4.pop();
+            }
+        },
+        async {
+            for k in 0..lim {
+                dbg!("Task C");
+                {
+                    let mut guard = mtx.lock().await;
+                    guard.field4.push(k);
+                    guard.field3.1 = !guard.field3.1;
+                }
+            }
+        }
+    ).join().await;
+    dbg!(mtx.lock().await.as_ref());
 }
