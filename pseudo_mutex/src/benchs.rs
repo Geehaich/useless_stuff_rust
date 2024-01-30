@@ -97,6 +97,7 @@ pub fn bench_as_vs_os(threads: u32, tasks: u32) -> (u128, u128) {
     let mutax = Arc::new(Mutex::<u32>::new(0));
     let mut handvec = Vec::<_>::new();
 
+    //Custom mutex
     let a = std::time::Instant::now();
     for _i in 0..threads {
         let r: Arc<Mutex<u32>> = mutax.clone();
@@ -109,6 +110,7 @@ pub fn bench_as_vs_os(threads: u32, tasks: u32) -> (u128, u128) {
 
     let as_time = a.elapsed().as_micros();
 
+    //OS mutex
     let a = std::time::Instant::now();
     let osax = Arc::new(std::sync::Mutex::<u32>::new(0));
     let mut handvec = Vec::<_>::new();
@@ -172,6 +174,71 @@ pub fn bench_tasks_threads(threads: u32, tasks: u32, wait: u64) {
     }
 }
 
+//benchmark things
+#[test]
+fn single() {
+    let lim : u128 = 10;
+    let mut r : (u128,u128) = (0,0);
+    for i in 0..lim {
+        let t : (u128, u128) = bench_as_vs_os(8, 200);
+        r.0 += t.0;
+        r.1 += t.1;
+        println!("Loop {} Crate: {}, OS {}; ", i, t.0, t.1);
+    }
+
+    println!("Total - Crate: {} OS: {}", r.0 / lim, r.1 / lim)
+}
+
+#[test]
+fn block_lock()  //test blocking access
+{
+    let mutax  = std::sync::Arc::new(Mutex::new(0));
+
+    let mut handles = vec![];
+
+    let n_threads = 25;
+    for i in 0..n_threads {
+        let data: Arc<Mutex<u64>> = std::sync::Arc::clone(&mutax);
+        handles.push(std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis((10*i)^113)); //scrambles thread access order
+            let mut guard = data.sync_lock();
+            *guard += i;
+            println!("thread {} has mtx",i);
+            println!("{}",*guard);
+            // the lock is unlocked here when `data` goes out of scope.
+        }));
+       }
+
+    for hand in handles { _ = hand.join();}
+}
+
+
+#[test]
+fn from_test() //test conversion from std mutex
+{
+    let mutex_os: std::sync::Mutex<u64>  = crate::Sync_Mutex::new(0);
+    let mutex_as : Mutex<u64> = Mutex::<u64>::from(mutex_os);
+    let marc = std::sync::Arc::new(mutex_as);
+
+    let mut handles
+     = vec![];
+
+    let n_threads = 80;
+    for i in 0..n_threads {
+        let data = std::sync::Arc::clone(&marc);
+        handles.push(std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(i*3^113)); //scrambles thread access order
+            let mut guard = data.sync_lock();
+            *guard += i;
+            println!("thread {} has mtx",i);
+            // the lock is unlocked here when `data` goes out of scope.
+        }));
+    }
+    for hand in handles {
+        _ = hand.join();
+    }
+}
+
 #[derive(Debug)]
 struct Schmilblick {
     field1 : i64,
@@ -196,29 +263,29 @@ impl Schmilblick {
 async fn concurrency_test_single() {
     let mtx = Arc::new(Mutex::new(Schmilblick::new()));
 
-    let lim: usize = 100000;
+    let lim: usize = 100_000;
     (
         async {
             for _i in 0..lim {
                 mtx.lock().await.field1 += 1;
-                std::thread::sleep(Duration::from_micros(500));
+                std::thread::sleep(Duration::from_micros(5));
             }
         },
         async {
             for j in 0..lim {
                 let c = char::from_u32(j as u32 % 26 + 65).unwrap();
                 mtx.lock().await.field2.push(c);
-                std::thread::sleep(Duration::from_micros(500));
+                std::thread::sleep(Duration::from_micros(5));
             }
         },
         async {
             for k in 0..lim {
                 mtx.lock().await.field4.push(k);
-                std::thread::sleep(Duration::from_micros(500));
+                std::thread::sleep(Duration::from_micros(5));
             }
         }
     ).join().await;
-    dbg!(mtx.lock().await.as_ref());
+    dbg!(&*mtx.lock().await);
 }
 
 #[allow(dead_code)]
@@ -226,7 +293,7 @@ async fn concurrency_test_single() {
 async fn concurrency_test_mixed() {
     let mtx = Arc::new(Mutex::new(Schmilblick::new()));
 
-    let lim: usize = 100000;
+    let lim: usize = 100_000;
     (
         async {
             for _i in 0..lim {
@@ -258,5 +325,5 @@ async fn concurrency_test_mixed() {
             }
         }
     ).join().await;
-    dbg!(mtx.lock().await.as_ref());
+    dbg!(&*mtx.lock().await);
 }

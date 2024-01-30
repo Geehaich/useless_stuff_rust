@@ -1,12 +1,14 @@
 use core::future::Future;
 use core::cell::UnsafeCell;
-use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::error::Error;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
-
 use std::sync::Mutex as Sync_Mutex;
+
+#[cfg(test)]
+mod benchs;
 
 const DEFAULT_SIZE: usize = 16;
 const DEFAULT_YIELD: usize = 32;
@@ -16,7 +18,8 @@ const DEFAULT_DURATION : u64 = 10;
 pub struct Mutex<T> {
     bool_locked: AtomicBool,
     can_queue: AtomicBool,
-    task_queue: UnsafeCell<VecDeque<Waker>>,
+    is_async_locked : AtomicBool,
+    task_queue: UnsafeCell<HashMap<usize,Waker>>,
     data: UnsafeCell<T>,
 }
 
@@ -32,15 +35,14 @@ impl<T> Mutex<T> {
     /// Usefull in the case you want more waker than **default size (16)** count at start.
     /// If len = 0, initialise with default size
     pub fn new_with_capacity(resource: T, len: usize) -> Mutex<T> {
-        let deque: VecDeque<Waker> = match len > 0 {
-            true => VecDeque::<Waker>::with_capacity(len),
-            false => VecDeque::<Waker>::with_capacity(DEFAULT_SIZE),
-        };
+        let map : HashMap<usize,Waker> = if len > 0 { HashMap::with_capacity(len) } else { HashMap::with_capacity(DEFAULT_SIZE)};
+
 
         Mutex::<T> {
             bool_locked: AtomicBool::new(false),    //resou
-            task_queue: UnsafeCell::new(deque),     //waker deque. Unsaferce lock
             can_queue: AtomicBool::new(true),       //deque access lockCell justified by need to mutate self across tasks through immutable references.
+            is_async_locked : AtomicBool::new(false),
+            task_queue : UnsafeCell::new(map),
             data: UnsafeCell::<T>::new(resource),   // Actual resource. UnsafeCell justified because Mozilla does it
         }
     }
@@ -58,13 +60,10 @@ impl<T> Mutex<T> {
 
     pub fn try_lock(&self) -> Result<LockGuard<T>, LockError>
     {
-        match self.bool_locked.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        match self.bool_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         {
-            Ok(_) => Ok(LockGuard::<'_,T>::new(self)),
-            Err(_) =>
-            unsafe{
-                Err(LockError::new((*(self.task_queue.get())).len()))
-            }
+            Ok(_) => Ok(LockGuard::new(self)),
+            Err(_) => unsafe{ Err(LockError::new((*(self.task_queue.get())).len())) }
         }
     }
 
@@ -78,7 +77,7 @@ impl<T> Mutex<T> {
     pub fn sync_lock_with_time(&self, wait_granularity : u64 ) -> LockGuard<T>
     {
         let mut i = 0;
-        while self.bool_locked.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+        while self.bool_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
             if i < DEFAULT_YIELD {
                 std::thread::yield_now();
                 i += 1;
@@ -87,25 +86,44 @@ impl<T> Mutex<T> {
                 std::thread::sleep( std::time::Duration::from_micros(wait_granularity));
             }
         }
-        LockGuard::<'_,T>::new(&self)
+        self.is_async_locked.store(false, Ordering::Relaxed);
+        LockGuard::new(&self)
     }
 
 
     /// Pushes a Waker linked to a FutureLock to the front of the queue. Wakes it if it's the only one there, giving the resource to the task.
-    fn queue_waker(&self, wk: Waker) {
+    fn queue_waker(&self, wk: Waker) -> Option<usize> {
+
+        // Wait on insertion lock to access the deque
+        while self.can_queue.compare_exchange(true,false, Ordering::Release, Ordering::Relaxed).is_err() {
+            continue; }
+
         //justification : multiple futurelocks share refs to self (have to be immutable) but each needs to mutate self to update queue
         unsafe {
-            let queueref: &mut VecDeque<Waker> = &mut *self.task_queue.get();
+            let queueref: &mut HashMap<usize, Waker> = &mut *self.task_queue.get();
 
-            // Wait on insertion lock to access the deque
-            while self.can_queue.compare_exchange(true,false, Ordering::Relaxed, Ordering::Relaxed).is_err() {
-                continue; }
-            queueref.push_back(wk.clone());
-
+            //Generate a key associate to the waker
+            let mut idx : usize = 0;
+            while idx < usize::MAX {
+                if !queueref.contains_key(&idx) {
+                    if queueref.insert(idx, wk.clone()).is_some() {
+                        // panic!("Key already exist, concurency race detected")
+                        return Option::None;
+                    }
+                    break;
+                }
+                idx += 1;
+                if idx == usize::MAX {
+                    return Option::None; }
+            }
+            let r_idx: Option<usize> = Some(idx);
             if queueref.len() == 1 {
                 wk.clone().wake() }
 
-            self.can_queue.store(true,Ordering::Relaxed); //  unlock the deque again
+            self.can_queue.store(true,Ordering::Relaxed);
+
+            //Return key of inserted waker
+            r_idx
         }
     }
 
@@ -116,19 +134,17 @@ impl<T> Mutex<T> {
         }
 
         // Justification : same as queue_waker
+        while self.can_queue.compare_exchange( true,false, Ordering::Release, Ordering::Relaxed).is_err() {
+            continue; }
+
+        self.bool_locked.store(false,Ordering::SeqCst);
+
         unsafe {
-            let queueref: &mut VecDeque<Waker> = &mut *self.task_queue.get();
-            while self.can_queue.compare_exchange(true,false, Ordering::Relaxed, Ordering::Relaxed).is_err() {
-                continue; }
-
-            _ = queueref.pop_front();
-            self.bool_locked.store(false,Ordering::Relaxed);
-
-            if queueref.len()!=0 {
-                queueref[0].clone().wake(); }
-
-            self.can_queue.store(true,Ordering::Relaxed);
+            let queueref: &mut HashMap<usize,Waker> = &mut *self.task_queue.get();
+            if let Some(wk) = queueref.values().next() {
+                wk.clone().wake(); }
         }
+        self.can_queue.store(true,Ordering::Relaxed);
     }
 }
 
@@ -172,6 +188,7 @@ impl Error for LockError {
 pub struct FutureLock<'a, T> {
     source: &'a Mutex<T>,
     context_in_mtx: AtomicBool,
+    wk_key : AtomicUsize,
 }
 
 impl<'a, T> FutureLock<'a, T> {
@@ -180,6 +197,7 @@ impl<'a, T> FutureLock<'a, T> {
         FutureLock {
             source: _source,
             context_in_mtx: AtomicBool::new(false),
+            wk_key : AtomicUsize::new(usize::MAX)
         }
     }
 }
@@ -190,14 +208,22 @@ impl<'a, T> Future for FutureLock<'a, T> {
     /// Try to lock mutex
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // on first poll, add the waker to PseudoMutex queue
-        if !self.context_in_mtx.load(Ordering::Relaxed) {
-            self.source.queue_waker(cx.waker().clone());
-            self.context_in_mtx.store(true, Ordering::Relaxed);
+        if !self.context_in_mtx.load(Ordering::Acquire) {
+            self.wk_key.store(self.source.queue_waker(cx.waker().clone()).unwrap(), Ordering::SeqCst);
+            self.context_in_mtx.store(true, Ordering::Release);
             Poll::Pending
         } else {
             //check if locked by attempting to lock. if success return Pseudoguard
-            match self.source.bool_locked.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => Poll::Ready(LockGuard::new(self.source)),
+            match self.source.bool_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
+                Ok(_) => {
+                    unsafe {
+                        let queueref: &mut HashMap<usize,Waker> = &mut *self.source.task_queue.get();
+                        let pair: Option<Waker> = queueref.remove(&self.wk_key.load(Ordering::SeqCst));
+                        if pair.is_none() { panic!() }
+                        self.source.is_async_locked.store(true, Ordering::Relaxed);
+                        Poll::Ready(LockGuard::new(self.source))
+                    }
+                },
                 Err(_) => Poll::Pending,
             }
         }
@@ -213,13 +239,7 @@ impl<'a, T> LockGuard<'a, T> {
     #[allow(dead_code)]
     /// Ctor, lock pseudo mutex given n argument. Private ctor.
     fn new(mtx: &'a Mutex<T>) -> LockGuard<'a, T> {
-        LockGuard { lock: mtx }
-    }
-
-    /// Return a reference to the internal object by calling Deref trait
-    /// Equivalent to `&*self`
-    fn as_ref(&self) -> &T {
-        &*self
+        LockGuard { lock: mtx}
     }
 }
 
@@ -244,71 +264,5 @@ impl<T> DerefMut for LockGuard<'_, T> {
     /// It's fundamentally unsafe as the resource is behing an UnsafeCell<T> but are implemented safe to comply with trait specs
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *self.lock.data.get() }
-    }
-}
-
-#[cfg(test)]
-mod benchs;
-
-//benchmark things
-#[test]
-fn single() {
-    let lim : u128 = 10;
-    let mut r : (u128,u128) = (0,0);
-    for _i in 0..lim {
-        let t : (u128, u128) = benchs::bench_as_vs_os(8, 200);
-        r.0 += t.0;
-        r.1 += t.1;
-    }
-
-    println!("Crate: {} OS: {}", r.0 / lim, r.1 / lim)
-}
-
-#[test]
-fn block_lock()  //test blocking access
-{
-    let mutax  = std::sync::Arc::new(Mutex::new(0));
-
-    let mut handles = vec![];
-
-    let n_threads = 25;
-    for i in 0..n_threads {
-        let data = std::sync::Arc::clone(&mutax);
-        handles.push(std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis((10*i)^113)); //scrambles thread access order
-            let mut guard = data.sync_lock();
-            *guard += i;
-            println!("thread {} has mtx",i);
-            println!("{}",*guard);
-            // the lock is unlocked here when `data` goes out of scope.
-        }));
-       }
-
-    for hand in handles { _ = hand.join();}
-}
-
-
-#[test]
-fn from_test() //test conversion from std mutex
-{
-    let mutex_os: Sync_Mutex<u64>  = Sync_Mutex::new(0);
-    let mutex_as : Mutex<u64> = Mutex::<u64>::from(mutex_os);
-    let marc = std::sync::Arc::new(mutex_as);
-
-    let mut handles = vec![];
-
-    let n_threads = 80;
-    for i in 0..n_threads {
-        let data = std::sync::Arc::clone(&marc);
-        handles.push(std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(i*3^113)); //scrambles thread access order
-            let mut guard = data.sync_lock();
-            *guard += i;
-            println!("thread {} has mtx",i);
-            // the lock is unlocked here when `data` goes out of scope.
-        }));
-    }
-    for hand in handles {
-        _ = hand.join();
     }
 }
