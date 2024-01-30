@@ -56,7 +56,6 @@ async fn mut_work(m: Arc<Mutex<u32>>, wait: u64) {
 
     *guard += rand::random::<u32>() % 10 + 1;
     *guard %= 15000;
-    m.release();
 }
 
 #[allow(dead_code)]
@@ -143,8 +142,6 @@ async fn verbose_mut_work(m: Arc<Mutex<u32>>, wait: u64, thread: u32, task: u32)
     async_timer::AsyncTimeout::sleep_ms(wait).await;
 
     println!("tout");
-
-    m.release();
 }
 
 async fn verbose_as_main(metroid: Arc<Mutex<u32>>, n_thread: u32, n_tasks: u32, wait: u64) {
@@ -263,25 +260,26 @@ impl Schmilblick {
 async fn concurrency_test_single() {
     let mtx = Arc::new(Mutex::new(Schmilblick::new()));
 
+    let t = 5u64;
     let lim: usize = 100_000;
     (
         async {
             for _i in 0..lim {
                 mtx.lock().await.field1 += 1;
-                std::thread::sleep(Duration::from_micros(5));
+                std::thread::sleep(Duration::from_micros(t));
             }
         },
         async {
             for j in 0..lim {
                 let c = char::from_u32(j as u32 % 26 + 65).unwrap();
                 mtx.lock().await.field2.push(c);
-                std::thread::sleep(Duration::from_micros(5));
+                std::thread::sleep(Duration::from_micros(t));
             }
         },
         async {
             for k in 0..lim {
                 mtx.lock().await.field4.push(k);
-                std::thread::sleep(Duration::from_micros(5));
+                std::thread::sleep(Duration::from_micros(t));
             }
         }
     ).join().await;
@@ -326,4 +324,66 @@ async fn concurrency_test_mixed() {
         }
     ).join().await;
     dbg!(&*mtx.lock().await);
+}
+
+async fn async_test_part(mtx : Arc<Mutex<Schmilblick>>) {
+    let lim: usize = 1000;
+    (
+        async {
+            for _i in 0..lim {
+                {
+                    let mut guard = mtx.lock().await;
+                    guard.field1 += 1;
+                    let sz = guard.field4.len() - 1;
+                    guard.field4[sz] = usize::MAX;
+                }
+            }
+        },
+        async {
+            for j in 0..lim {
+                let c = char::from_u32(j as u32 % 26 + 65).unwrap();
+                mtx.lock().await.field2.push(c);
+                mtx.lock().await.field4.pop();
+            }
+        },
+        async {
+            for k in 0..lim {
+                {
+                    let mut guard = mtx.lock().await;
+                    guard.field4.push(k);
+                    guard.field3.1 = !guard.field3.1;
+                }
+            }
+        }
+    ).join().await;
+    println!("End task");
+}
+
+fn sync_async(mtx : Arc<Mutex<Schmilblick>>) -> Box<dyn futures::Future<Output = ()>>{
+    Box::new(async_test_part(mtx))
+}
+
+// Test not complete for the momemt... DO NOT USE
+#[allow(dead_code)]
+#[tokio::test]
+async fn concurency_test_thread() {
+
+
+    let threads : Vec<std::thread::JoinHandle<Box<dyn futures::Future<Output = ()>>>> = Vec::with_capacity(32);
+    let mtx = Arc::new(Mutex::new(Schmilblick::new()));
+
+    //Spawn thread with task
+    for _i in 0..20 {
+        //let task = Box::<dyn futures::Future<Output = ()>>::new(async_test_part(mtx.clone()));
+        let clonx = mtx.clone();
+        let task = sync_async(clonx);
+
+
+        //threads.push(std::thread::spawn(|| task)); // TODO debug
+    }
+
+    //Join thread
+    for thd in threads {
+        thd.join();
+    }
 }
