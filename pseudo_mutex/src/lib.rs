@@ -10,7 +10,7 @@ use std::sync::Mutex as Sync_Mutex;
 #[cfg(test)]
 mod benchs;
 
-const DEFAULT_SIZE: usize = 16;
+const DEFAULT_SIZE: usize = 8;
 const DEFAULT_YIELD: usize = 32;
 const DEFAULT_DURATION : u64 = 10;
 
@@ -93,16 +93,32 @@ impl<T> Mutex<T> {
         !self.is_locked.load(Ordering::Acquire)
     }
 
+    // Wait until the task hashmap is available, lock it, return mutable reference to it.
+    pub fn waitlock_task_hashmap(&self) -> &mut HashMap<usize,Waker>
+    {
+        unsafe
+        {
+                // Wait on insertion lock to access the task map
+                while self.can_enqueue.compare_exchange(true,false, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                    continue; }
+                
+                &mut *self.tasks.get()
+        }
+
+    }
+
+    // allow access to task hashmap. 
+    pub fn unlock_task_hashmap(&self)
+    {
+        self.can_enqueue.store(true,Ordering::Relaxed);
+    }
     /// Pushes a Waker linked to a FutureLock to the front of the queue. Wakes it if it's the only one there, giving the resource to the task.
     fn queue_waker(&self, wk: Waker) -> Option<usize> {
 
-        // Wait on insertion lock to access the deque
-        while self.can_enqueue.compare_exchange(true,false, Ordering::Acquire, Ordering::Relaxed).is_err() {
-            continue; }
+
 
         //justification : multiple futurelocks share refs to self (have to be immutable) but each needs to mutate self to update queue
-        unsafe {
-            let queueref: &mut HashMap<usize, Waker> = &mut *self.tasks.get();
+            let queueref = self.waitlock_task_hashmap();
 
             //Generate a key associate to the waker
             let mut idx : usize = 0;
@@ -122,12 +138,12 @@ impl<T> Mutex<T> {
             if queueref.len() == 1 {
                 wk.clone().wake() }
 
-            self.can_enqueue.store(true,Ordering::Release);
+            self.unlock_task_hashmap();
 
             //Return key of inserted waker
             r_idx
         }
-    }
+    
 
     // unlock the mutex, start next Waker to attribute the resource if applicable
     pub fn release(&self) -> () {
@@ -136,17 +152,19 @@ impl<T> Mutex<T> {
         }
 
         // Justification : same as queue_waker
-        while self.can_enqueue.compare_exchange( true,false, Ordering::Acquire, Ordering::Relaxed).is_err() {
-            continue; }
+        self.waitlock_task_hashmap();
 
         unsafe {
             let queueref: &mut HashMap<usize,Waker> = &mut *self.tasks.get();
             if let Some(wk) = queueref.values().next() {
                 wk.clone().wake(); }
+
         }
+        self.unlock_task_hashmap();
         self.is_locked.store(false,Ordering::Release);
-        self.can_enqueue.store(true,Ordering::Release);
+
     }
+
 }
 
 impl<T> From<Sync_Mutex<T>> for Mutex<T>
@@ -205,25 +223,28 @@ impl<'a, T> Future for FutureLock<'a, T> {
 
     /// Try to lock mutex
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // on first poll, add the waker to PseudoMutex queue
-        if !self.context_in_mtx.load(Ordering::Acquire) {
-            self.wk_key.store(self.source.queue_waker(cx.waker().clone()).unwrap(), Ordering::Release);
-            self.context_in_mtx.store(true, Ordering::Release);
-            Poll::Pending
-        } else {
+       
             //check if locked by attempting to lock. if success return Pseudoguard
             // match self.source.bool_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
             match self.source.can_lock() {
                 true => {
-                    unsafe {
-                        let queueref: &mut HashMap<usize,Waker> = &mut *self.source.tasks.get();
-                        let pair: Option<Waker> = queueref.remove(&self.wk_key.load(Ordering::Acquire));
-                        if pair.is_none() {
-                            panic!() }
+                        
+                        let qref = self.source.waitlock_task_hashmap();
+                        let _pair: Option<Waker> = qref.remove(&self.wk_key.load(Ordering::Acquire));
+                        // if pair.is_none() {
+                        //     panic!() }
+                        self.source.unlock_task_hashmap();
+                        
                         Poll::Ready(LockGuard::new(self.source))
-                    }
+                    
                 },
-                false => Poll::Pending,
+                false => //add context to queue if not already present for subsequent polls
+                {
+                    if !self.context_in_mtx.load(Ordering::Acquire) {
+                        self.wk_key.store(self.source.queue_waker(cx.waker().clone()).unwrap(), Ordering::Release);
+                        self.context_in_mtx.store(true, Ordering::Release);
+                    }
+                Poll::Pending
             }
         }
     }
@@ -255,7 +276,7 @@ impl<T> Deref for LockGuard<'_, T> {
     /// Deref return reference to the actual resource.
     /// It's fundamentally unsafe as the resource is behing an UnsafeCell<T> but are implemented safe to comply with trait specs
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.lock.data.get() }
+            unsafe {  &*self.lock.data.get() }
     }
 }
 
@@ -263,6 +284,7 @@ impl<T> DerefMut for LockGuard<'_, T> {
     /// DerefMut return a mutable reference to the actual ressource.
     /// It's fundamentally unsafe as the resource is behing an UnsafeCell<T> but are implemented safe to comply with trait specs
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.lock.data.get() }
+        unsafe { 
+             &mut *self.lock.data.get() }
     }
 }

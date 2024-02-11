@@ -128,33 +128,8 @@ pub fn bench_as_vs_os(threads: u32, tasks: u32) -> (u128, u128) {
     (as_time, os_time)
 }
 
-// same as mut_work with printouts
-async fn verbose_mut_work(m: Arc<Mutex<u32>>, wait: u64, thread: u32, task: u32) {
-    async_timer::AsyncTimeout::sleep_ms(wait + rand::random::<u64>() % 60).await;
-    let mut guard = m.lock().await;
-    println!(
-        "thread {} , task {} acquired mutex, current value {}",
-        thread, task, *guard
-    );
-    *guard += rand::random::<u32>() % 10 + 1;
-    *guard %= 15000;
-
-    async_timer::AsyncTimeout::sleep_ms(wait).await;
-
-    println!("tout");
-}
-
-async fn verbose_as_main(metroid: Arc<Mutex<u32>>, n_thread: u32, n_tasks: u32, wait: u64) {
-    let mut futs = Vec::<_>::new();
-
-    for _i in 0..n_tasks {
-        futs.push(verbose_mut_work(metroid.clone(), wait as u64, n_thread, _i));
-    }
-    futures::future::join_all(futs).await;
-}
-
 #[allow(dead_code)]
-pub fn bench_tasks_threads(threads: u32, tasks: u32, wait: u64) {
+pub fn bench_tasks_threads(threads: u32, tasks: u32) {
     let mutax = Arc::new(Mutex::<u32>::new(0));
     let mut handvec = Vec::<_>::new();
 
@@ -162,7 +137,7 @@ pub fn bench_tasks_threads(threads: u32, tasks: u32, wait: u64) {
     for _i in 0..threads {
         let r: Arc<Mutex<u32>> = mutax.clone();
         handvec.push(std::thread::spawn(move || {
-            block_on(verbose_as_main(r, _i, tasks, wait))
+            block_on(as_main(r, tasks))
         }));
     }
 
@@ -173,11 +148,22 @@ pub fn bench_tasks_threads(threads: u32, tasks: u32, wait: u64) {
 
 //benchmark things
 #[test]
+fn basic_funcs()
+{
+    for _i in 0..10
+    {
+    bench_tasks_threads(8, 1000);
+    println!("{}",_i);
+    }
+}
+
+
+#[test]
 fn single() {
-    let lim : u128 = 10;
+    let lim : u128 = 150;
     let mut r : (u128,u128) = (0,0);
     for i in 0..lim {
-        let t : (u128, u128) = bench_as_vs_os(8, 200);
+        let t : (u128, u128) = bench_as_vs_os(13, 200);
         r.0 += t.0;
         r.1 += t.1;
         println!("Loop {} Crate: {}, OS {}; ", i, t.0, t.1);
@@ -190,7 +176,6 @@ fn single() {
 fn block_lock()  //test blocking access
 {
     let mutax  = std::sync::Arc::new(Mutex::new(0));
-
     let mut handles = vec![];
 
     let n_threads = 25;
@@ -261,7 +246,7 @@ async fn concurrency_test_single() {
     let mtx = Arc::new(Mutex::new(Schmilblick::new()));
 
     let t = 5u64;
-    let lim: usize = 100_000;
+    let lim: usize = 100;
     (
         async {
             for _i in 0..lim {
@@ -291,7 +276,7 @@ async fn concurrency_test_single() {
 async fn concurrency_test_mixed() {
     let mtx = Arc::new(Mutex::new(Schmilblick::new()));
 
-    let lim: usize = 100_000;
+    let lim: usize = 50;
     (
         async {
             for _i in 0..lim {
@@ -376,7 +361,7 @@ async fn concurency_test_thread() {
     for _i in 0..20 {
         //let task = Box::<dyn futures::Future<Output = ()>>::new(async_test_part(mtx.clone()));
         let clonx = mtx.clone();
-        let task = sync_async(clonx);
+        let _task = sync_async(clonx);
 
 
         //threads.push(std::thread::spawn(|| task)); // TODO debug
@@ -384,6 +369,6 @@ async fn concurency_test_thread() {
 
     //Join thread
     for thd in threads {
-        thd.join();
+        let _ = thd.join();
     }
 }
