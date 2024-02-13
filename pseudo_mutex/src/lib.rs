@@ -152,10 +152,6 @@ impl<T> Mutex<T> {
 
     /// Unlock the mutex, start next Waker to attribute the resource if applicable
     pub fn release(&self) -> () {
-        if !self.is_locked.load(Ordering::Acquire) {
-            return; //in case of double call (manual + release from dropping MutexGuard)
-        }
-
         // Justification : same as queue_waker
         self.wait_lock_task_hashmap();
         unsafe {

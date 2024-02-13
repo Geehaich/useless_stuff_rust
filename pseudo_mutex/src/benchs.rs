@@ -163,7 +163,7 @@ fn single() {
     let lim : u128 = 150;
     let mut r : (u128,u128) = (0,0);
     for i in 0..lim {
-        let t : (u128, u128) = bench_as_vs_os(13, 200);
+        let t : (u128, u128) = bench_as_vs_os(4,50);
         r.0 += t.0;
         r.1 += t.1;
         println!("Loop {} Crate: {}, OS {}; ", i, t.0, t.1);
