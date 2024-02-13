@@ -146,16 +146,16 @@ pub fn bench_tasks_threads(threads: u32, tasks: u32) {
     }
 }
 
-//benchmark things
-#[test]
-fn basic_funcs()
-{
-    for _i in 0..10
-    {
-    bench_tasks_threads(8, 1000);
-    println!("{}",_i);
-    }
-}
+// //benchmark things
+// #[test]
+// fn basic_funcs()
+// {
+//     for _i in 0..10
+//     {
+//     bench_tasks_threads(8, 1000);
+//     println!("{}",_i);
+//     }
+// }
 
 
 #[test]
