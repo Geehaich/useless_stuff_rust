@@ -54,7 +54,6 @@ impl<T> Mutex<T> {
     pub fn new(resource: T) -> Mutex<T> {
         return Mutex::<T>::new_with_capacity(resource, 0);
     }
-
     /// Lock the mutex by creating a FutureLock structs (private structure) and awaiting it.
     /// A successful FutureLock poll locks the atomic lock and returns a PseudoGuard used to access the resource
     pub fn lock(&self) -> FutureLock<T> {
@@ -62,14 +61,9 @@ impl<T> Mutex<T> {
     }
 
     /// Try to lock mutex
-    pub fn try_lock(&self) -> Result<LockGuard<T>, LockError>
+    pub fn try_lock(&self) -> bool
     {
-        //match self.bool_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        match self.is_locked.load(Ordering::Acquire)
-        {
-            true => Ok(LockGuard::new(self)),
-            false => unsafe{ Err(LockError::new((*(self.tasks.get())).len())) }
-        }
+        self.is_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok()        
     }
 
     /// Attempt to lock a mutex by yielding thread. If it's take to much time, this function use default granularity time
@@ -83,7 +77,8 @@ impl<T> Mutex<T> {
     {
         let mut i = 0;
         // while self.bool_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        while self.is_locked.load(Ordering::Acquire) {
+        while self.is_locked.load(Ordering::Acquire)
+        {
             if i < DEFAULT_YIELD {
                 std::thread::yield_now();
                 i += 1;
@@ -96,7 +91,7 @@ impl<T> Mutex<T> {
     }
 
     /// Get accessor to check if mutex is actively locked
-    pub fn can_lock(&self) -> bool {
+    pub fn get_lock_status(&self) -> bool {
         !self.is_locked.load(Ordering::Acquire)
     }
 
@@ -127,9 +122,12 @@ impl<T> Mutex<T> {
 
         //Generate a key associate to the waker
         let mut idx : usize = 0;
-        while idx < usize::MAX {
-            if !tasks.contains_key(&idx) {
-                if tasks.insert(idx, wk.clone()).is_some() {
+        while idx < usize::MAX
+        {
+            if !tasks.contains_key(&idx) 
+            {
+                if tasks.insert(idx, wk.clone()).is_some()
+                {
                     // panic!("Key already exist, concurency race detected")
                     return Option::None;
                 }
@@ -140,8 +138,6 @@ impl<T> Mutex<T> {
                 return Option::None; }
         }
         let r_idx: Option<usize> = Some(idx);
-        if tasks.len() == 1 {
-            wk.clone().wake() }
 
         self.unlock_task_hashmap();
 
@@ -151,17 +147,24 @@ impl<T> Mutex<T> {
 
 
     /// Unlock the mutex, start next Waker to attribute the resource if applicable
-    pub fn release(&self) -> () {
+    pub fn release(&self) -> ()
+     {
         // Justification : same as queue_waker
         self.wait_lock_task_hashmap();
-        unsafe {
-            let queueref: &mut HashMap<usize,Waker> = &mut *self.tasks.get();
-            if let Some(wk) = queueref.values().next() {
-                wk.clone().wake(); }
+        unsafe 
+        {
+            let taskref: &mut HashMap<usize,Waker> = &mut *self.tasks.get();
+            
 
-        }
+        
         self.unlock_task_hashmap();
         self.is_locked.store(false,Ordering::Release);
+
+        if let Some(wk) = taskref.values().next()
+            {
+                wk.clone().wake(); 
+            }
+        }
     }
 
 }
@@ -224,7 +227,7 @@ impl<'a, T> Future for FutureLock<'a, T> {
     /// Try to periodicaly lock the mutex
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         //check if locked by attempting to lock. if success return Pseudoguard
-        return if self.source.can_lock() {
+        if self.source.try_lock() {
             let qref = self.source.wait_lock_task_hashmap();
             let _pair: Option<Waker> = qref.remove(&self.wk_key.load(Ordering::Acquire));
             self.source.unlock_task_hashmap();
@@ -249,8 +252,8 @@ pub struct LockGuard<'a, T> {
 impl<'a, T> LockGuard<'a, T> {
     #[allow(dead_code)]
     /// Ctor, lock pseudo mutex given n argument. Private ctor.
-    fn new(mtx: &'a Mutex<T>) -> LockGuard<'a, T> {
-        mtx.is_locked.store(true, Ordering::Release);
+    fn new(mtx: &'a Mutex<T>) -> LockGuard<'a, T> 
+    {
         LockGuard { lock: mtx }
     }
 }
@@ -279,3 +282,4 @@ impl<T> DerefMut for LockGuard<'_, T> {
              &mut *self.lock.data.get() }
     }
 }
+
