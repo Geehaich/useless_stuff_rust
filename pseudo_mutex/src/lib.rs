@@ -54,6 +54,7 @@ impl<T> Mutex<T> {
     pub fn new(resource: T) -> Mutex<T> {
         return Mutex::<T>::new_with_capacity(resource, 0);
     }
+
     /// Lock the mutex by creating a FutureLock structs (private structure) and awaiting it.
     /// A successful FutureLock poll locks the atomic lock and returns a PseudoGuard used to access the resource
     pub fn lock(&self) -> FutureLock<T> {
@@ -61,9 +62,8 @@ impl<T> Mutex<T> {
     }
 
     /// Try to lock mutex
-    pub fn try_lock(&self) -> bool
-    {
-        self.is_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok()        
+    pub fn try_lock(&self) -> bool {
+        self.is_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok()
     }
 
     /// Attempt to lock a mutex by yielding thread. If it's take to much time, this function use default granularity time
@@ -124,7 +124,7 @@ impl<T> Mutex<T> {
         let mut idx : usize = 0;
         while idx < usize::MAX
         {
-            if !tasks.contains_key(&idx) 
+            if !tasks.contains_key(&idx)
             {
                 if tasks.insert(idx, wk.clone()).is_some()
                 {
@@ -151,18 +151,14 @@ impl<T> Mutex<T> {
      {
         // Justification : same as queue_waker
         self.wait_lock_task_hashmap();
-        unsafe 
+        unsafe
         {
             let taskref: &mut HashMap<usize,Waker> = &mut *self.tasks.get();
-            
+            self.unlock_task_hashmap();
+            self.is_locked.store(false,Ordering::Release);
 
-        
-        self.unlock_task_hashmap();
-        self.is_locked.store(false,Ordering::Release);
-
-        if let Some(wk) = taskref.values().next()
-            {
-                wk.clone().wake(); 
+            if let Some(wk) = taskref.values().next() {
+                wk.clone().wake();
             }
         }
     }
@@ -252,7 +248,7 @@ pub struct LockGuard<'a, T> {
 impl<'a, T> LockGuard<'a, T> {
     #[allow(dead_code)]
     /// Ctor, lock pseudo mutex given n argument. Private ctor.
-    fn new(mtx: &'a Mutex<T>) -> LockGuard<'a, T> 
+    fn new(mtx: &'a Mutex<T>) -> LockGuard<'a, T>
     {
         LockGuard { lock: mtx }
     }
@@ -270,7 +266,7 @@ impl<T> Deref for LockGuard<'_, T> {
     /// Deref return reference to the actual resource.
     /// It's fundamentally unsafe as the resource is behing an UnsafeCell<T> but are implemented safe to comply with trait specs
     fn deref(&self) -> &Self::Target {
-            unsafe {  &*self.lock.data.get() }
+        unsafe {  &*self.lock.data.get() }
     }
 }
 
@@ -282,4 +278,3 @@ impl<T> DerefMut for LockGuard<'_, T> {
              &mut *self.lock.data.get() }
     }
 }
-
