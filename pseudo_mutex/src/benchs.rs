@@ -51,7 +51,7 @@ pub mod async_timer {
 #[allow(dead_code)]
 /// Function called by every task in the queue
 async fn mut_work(m: Arc<Mutex<u32>>, wait: u64) {
-    async_timer::AsyncTimeout::sleep_ms(wait + rand::random::<u64>() % 60).await;
+    //async_timer::AsyncTimeout::sleep_ms(wait + rand::random::<u64>() % 60).await;
     let mut guard = m.lock().await;
 
     *guard += rand::random::<u32>() % 10 + 1;
@@ -61,7 +61,7 @@ async fn mut_work(m: Arc<Mutex<u32>>, wait: u64) {
 #[allow(dead_code)]
 //equivalent to mut_work using OS mutexes
 async fn os_mut_work(m: Arc<std::sync::Mutex<u32>>, wait: u64) {
-    async_timer::AsyncTimeout::sleep_ms(wait + rand::random::<u64>() % 60).await;
+    //async_timer::AsyncTimeout::sleep_ms(wait + rand::random::<u64>() % 60).await;
     let mut guard = m.lock().unwrap();
     *guard += rand::random::<u32>() % 10 + 1;
     *guard %= 15000;
@@ -146,24 +146,24 @@ pub fn bench_tasks_threads(threads: u32, tasks: u32) {
     }
 }
 
-//benchmark things
+// //benchmark things
+
 #[test]
 fn basic_funcs()
 {
-    for _i in 0..10
+    for _i in 0..150
     {
-    bench_tasks_threads(8, 1000);
+    bench_tasks_threads(8, 200);
     println!("{}",_i);
     }
 }
-
 
 #[test]
 fn single() {
     let lim : u128 = 150;
     let mut r : (u128,u128) = (0,0);
     for i in 0..lim {
-        let t : (u128, u128) = bench_as_vs_os(13, 200);
+        let t : (u128, u128) = bench_as_vs_os(8,200);
         r.0 += t.0;
         r.1 += t.1;
         println!("Loop {} Crate: {}, OS {}; ", i, t.0, t.1);

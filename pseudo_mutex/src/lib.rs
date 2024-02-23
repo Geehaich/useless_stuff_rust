@@ -10,14 +10,21 @@ use std::sync::Mutex as Sync_Mutex;
 #[cfg(test)]
 mod benchs;
 
+/* ============ CONSTANTS ============  */
+
+/// Tasks map default size
 const DEFAULT_SIZE: usize = 8;
+/// Limite of threading swithing between attempts to lock the mutex (sync).
 const DEFAULT_YIELD: usize = 32;
+/// Sleep duration in microseconds between two attempts to lock the mutex (sync)
 const DEFAULT_DURATION : u64 = 10;
 
-//PseudoMutex is an asynchronous equivalent to a Mutex using a Deque to keep track of tasks waiting on the resource.
+/* ============ LIBS CODE ============  */
+
+///PseudoMutex is an asynchronous equivalent to a Mutex using a Deque to keep track of tasks waiting on the resource.
 pub struct Mutex<T> {
     is_locked: AtomicBool,
-    can_enqueue: AtomicBool,
+    can_insert: AtomicBool,
     tasks: UnsafeCell<HashMap<usize,Waker>>,
     data: UnsafeCell<T>,
 }
@@ -26,43 +33,37 @@ pub struct Mutex<T> {
 unsafe impl<T> Send for Mutex<T> {}
 unsafe impl<T> Sync for Mutex<T> {}
 
-
 /// Mutex: Utilization simillar to the std mutex. Can register multiple waker.
 #[allow(dead_code)]
 impl<T> Mutex<T> {
-    // ctor setting deque initial capacity
+    /// Ctor setting deque initial capacity
     /// Usefull in the case you want more waker than **default size (16)** count at start.
     /// If len = 0, initialise with default size
     pub fn new_with_capacity(resource: T, len: usize) -> Mutex<T> {
         let map : HashMap<usize,Waker> = if len > 0 { HashMap::with_capacity(len) } else { HashMap::with_capacity(DEFAULT_SIZE)};
 
-
         Mutex::<T> {
             is_locked: AtomicBool::new(false),    //resou
-            can_enqueue: AtomicBool::new(true),       //deque access lockCell justified by need to mutate self across tasks through immutable references.
-            tasks : UnsafeCell::new(map),
-            data: UnsafeCell::<T>::new(resource),   // Actual resource. UnsafeCell justified because Mozilla does it
+            can_insert: AtomicBool::new(true),    //deque access lockCell justified by need to mutate self across tasks through immutable references.
+            tasks : UnsafeCell::new(map),         //Map of task waiting the mutex
+            data: UnsafeCell::<T>::new(resource), // Actual resource. UnsafeCell justified because Mozilla does it
         }
     }
+
     /// Ctor with default capacity of 8, should cover most cases
     pub fn new(resource: T) -> Mutex<T> {
         return Mutex::<T>::new_with_capacity(resource, 0);
     }
-
     /// Lock the mutex by creating a FutureLock structs (private structure) and awaiting it.
     /// A successful FutureLock poll locks the atomic lock and returns a PseudoGuard used to access the resource
     pub fn lock(&self) -> FutureLock<T> {
         FutureLock::new(self)
     }
 
-    pub fn try_lock(&self) -> Result<LockGuard<T>, LockError>
+    /// Try to lock mutex
+    pub fn try_lock(&self) -> bool
     {
-        //match self.bool_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        match self.is_locked.load(Ordering::Acquire)
-        {
-            true => Ok(LockGuard::new(self)),
-            false => unsafe{ Err(LockError::new((*(self.tasks.get())).len())) }
-        }
+        self.is_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok()        
     }
 
     /// Attempt to lock a mutex by yielding thread. If it's take to much time, this function use default granularity time
@@ -76,7 +77,8 @@ impl<T> Mutex<T> {
     {
         let mut i = 0;
         // while self.bool_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        while self.is_locked.load(Ordering::Acquire) {
+        while self.is_locked.load(Ordering::Acquire)
+        {
             if i < DEFAULT_YIELD {
                 std::thread::yield_now();
                 i += 1;
@@ -88,81 +90,81 @@ impl<T> Mutex<T> {
         LockGuard::new(&self)
     }
 
-    // Get accessor to check if mutex is actively locked
-    pub fn can_lock(&self) -> bool {
+    /// Get accessor to check if mutex is actively locked
+    pub fn get_lock_status(&self) -> bool {
         !self.is_locked.load(Ordering::Acquire)
     }
 
-    // Wait until the task hashmap is available, lock it, return mutable reference to it.
-    pub fn waitlock_task_hashmap(&self) -> &mut HashMap<usize,Waker>
+    /// Wait until the task hashmap is available, lock it, return mutable reference to it.
+    /// On insertion lock to access the task map
+    fn wait_lock_task_hashmap(&self) -> &mut HashMap<usize,Waker>
     {
         unsafe
         {
-                // Wait on insertion lock to access the task map
-                while self.can_enqueue.compare_exchange(true,false, Ordering::Acquire, Ordering::Relaxed).is_err() {
-                    continue; }
-                
-                &mut *self.tasks.get()
+            while self.can_insert.compare_exchange(true,false, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                continue; }
+            &mut *self.tasks.get()
         }
 
     }
 
-    // allow access to task hashmap. 
-    pub fn unlock_task_hashmap(&self)
+    /// Allow access to task hashmap.
+    fn unlock_task_hashmap(&self)
     {
-        self.can_enqueue.store(true,Ordering::Relaxed);
+        self.can_insert.store(true,Ordering::Relaxed);
     }
+
     /// Pushes a Waker linked to a FutureLock to the front of the queue. Wakes it if it's the only one there, giving the resource to the task.
     fn queue_waker(&self, wk: Waker) -> Option<usize> {
 
-
-
         //justification : multiple futurelocks share refs to self (have to be immutable) but each needs to mutate self to update queue
-            let queueref = self.waitlock_task_hashmap();
+        let tasks = self.wait_lock_task_hashmap();
 
-            //Generate a key associate to the waker
-            let mut idx : usize = 0;
-            while idx < usize::MAX {
-                if !queueref.contains_key(&idx) {
-                    if queueref.insert(idx, wk.clone()).is_some() {
-                        // panic!("Key already exist, concurency race detected")
-                        return Option::None;
-                    }
-                    break;
+        //Generate a key associate to the waker
+        let mut idx : usize = 0;
+        while idx < usize::MAX
+        {
+            if !tasks.contains_key(&idx) 
+            {
+                if tasks.insert(idx, wk.clone()).is_some()
+                {
+                    // panic!("Key already exist, concurency race detected")
+                    return Option::None;
                 }
-                idx += 1;
-                if idx == usize::MAX {
-                    return Option::None; }
+                break;
             }
-            let r_idx: Option<usize> = Some(idx);
-            if queueref.len() == 1 {
-                wk.clone().wake() }
-
-            self.unlock_task_hashmap();
-
-            //Return key of inserted waker
-            r_idx
+            idx += 1;
+            if idx == usize::MAX {
+                return Option::None; }
         }
-    
+        let r_idx: Option<usize> = Some(idx);
 
-    // unlock the mutex, start next Waker to attribute the resource if applicable
-    pub fn release(&self) -> () {
-        if !self.is_locked.load(Ordering::Acquire) {
-            return; //in case of double call (manual + release from dropping MutexGuard)
-        }
+        self.unlock_task_hashmap();
 
+        //Return key for inserted waker
+        r_idx
+    }
+
+
+    /// Unlock the mutex, start next Waker to attribute the resource if applicable
+    pub fn release(&self) -> ()
+     {
         // Justification : same as queue_waker
-        self.waitlock_task_hashmap();
+        self.wait_lock_task_hashmap();
+        unsafe 
+        {
+            let taskref: &mut HashMap<usize,Waker> = &mut *self.tasks.get();
+            
 
-        unsafe {
-            let queueref: &mut HashMap<usize,Waker> = &mut *self.tasks.get();
-            if let Some(wk) = queueref.values().next() {
-                wk.clone().wake(); }
-
-        }
+        
         self.unlock_task_hashmap();
         self.is_locked.store(false,Ordering::Release);
 
+        if let Some(wk) = taskref.values().next()
+            {
+                wk.clone().wake(); 
+            }
+        }
     }
 
 }
@@ -175,8 +177,9 @@ impl<T> From<Sync_Mutex<T>> for Mutex<T>
     }
 }
 
+///Simple error type for the try_error function
 #[derive(Debug)]
-pub struct LockError //Simple error type for the try_error function
+pub struct LockError
 {
     n_tasks : usize
 }
@@ -208,7 +211,7 @@ pub struct FutureLock<'a, T> {
 }
 
 impl<'a, T> FutureLock<'a, T> {
-    /// trivial ctor
+    /// Trivial ctor
     fn new(_source: &'a Mutex<T>) -> FutureLock<'a, T> {
         FutureLock {
             source: _source,
@@ -221,36 +224,27 @@ impl<'a, T> FutureLock<'a, T> {
 impl<'a, T> Future for FutureLock<'a, T> {
     type Output = LockGuard<'a, T>;
 
-    /// Try to lock mutex
+    /// Try to periodicaly lock the mutex
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-       
-            //check if locked by attempting to lock. if success return Pseudoguard
-            // match self.source.bool_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
-            match self.source.can_lock() {
-                true => {
-                        
-                        let qref = self.source.waitlock_task_hashmap();
-                        let _pair: Option<Waker> = qref.remove(&self.wk_key.load(Ordering::Acquire));
-                        // if pair.is_none() {
-                        //     panic!() }
-                        self.source.unlock_task_hashmap();
-                        
-                        Poll::Ready(LockGuard::new(self.source))
-                    
-                },
-                false => //add context to queue if not already present for subsequent polls
-                {
-                    if !self.context_in_mtx.load(Ordering::Acquire) {
-                        self.wk_key.store(self.source.queue_waker(cx.waker().clone()).unwrap(), Ordering::Release);
-                        self.context_in_mtx.store(true, Ordering::Release);
-                    }
-                Poll::Pending
+        //check if locked by attempting to lock. if success return Pseudoguard
+        if self.source.try_lock() {
+            let qref = self.source.wait_lock_task_hashmap();
+            let _pair: Option<Waker> = qref.remove(&self.wk_key.load(Ordering::Acquire));
+            self.source.unlock_task_hashmap();
+            Poll::Ready(LockGuard::new(self.source))
+        }
+        else {
+            //add context to queue if not already present for subsequent polls
+            if !self.context_in_mtx.load(Ordering::Acquire) {
+                self.wk_key.store(self.source.queue_waker(cx.waker().clone()).unwrap(), Ordering::Release);
+                self.context_in_mtx.store(true, Ordering::Release);
             }
+            Poll::Pending
         }
     }
 }
 
-///LockGuard is the equivalent of a Mutexguard, a struct used to access the data in a PseudoMutex which unlocks it on Drop.
+/// LockGuard is the equivalent of a Mutexguard, a struct used to access the data in a PseudoMutex which unlocks it on Drop.
 pub struct LockGuard<'a, T> {
     lock: &'a Mutex<T>,
 }
@@ -258,8 +252,8 @@ pub struct LockGuard<'a, T> {
 impl<'a, T> LockGuard<'a, T> {
     #[allow(dead_code)]
     /// Ctor, lock pseudo mutex given n argument. Private ctor.
-    fn new(mtx: &'a Mutex<T>) -> LockGuard<'a, T> {
-        mtx.is_locked.store(true, Ordering::Release);
+    fn new(mtx: &'a Mutex<T>) -> LockGuard<'a, T> 
+    {
         LockGuard { lock: mtx }
     }
 }
@@ -284,7 +278,8 @@ impl<T> DerefMut for LockGuard<'_, T> {
     /// DerefMut return a mutable reference to the actual ressource.
     /// It's fundamentally unsafe as the resource is behing an UnsafeCell<T> but are implemented safe to comply with trait specs
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { 
+        unsafe {
              &mut *self.lock.data.get() }
     }
 }
+
