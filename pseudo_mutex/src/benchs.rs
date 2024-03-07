@@ -53,7 +53,6 @@ pub mod async_timer {
 async fn mut_work(m: Arc<Mutex<u32>>, wait: u64) {
     //async_timer::AsyncTimeout::sleep_ms(wait + rand::random::<u64>() % 60).await;
     let mut guard = m.lock().await;
-
     *guard += rand::random::<u32>() % 10 + 1;
     *guard %= 15000;
 }

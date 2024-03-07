@@ -17,7 +17,7 @@ const DEFAULT_SIZE: usize = 8;
 /// Limite of threading swithing between attempts to lock the mutex (sync).
 const DEFAULT_YIELD: usize = 32;
 /// Sleep duration in microseconds between two attempts to lock the mutex (sync)
-const DEFAULT_DURATION : u64 = 10;
+const DEFAULT_DURATION : u64 = 5;
 
 /* ============ LIBS CODE ============  */
 
@@ -36,6 +36,9 @@ unsafe impl<T> Sync for Mutex<T> {}
 /// Mutex: Utilization simillar to the std mutex. Can register multiple waker.
 #[allow(dead_code)]
 impl<T> Mutex<T> {
+
+    // === Public function ===
+
     /// Ctor setting deque initial capacity
     /// Usefull in the case you want more waker than **default size (16)** count at start.
     /// If len = 0, initialise with default size
@@ -58,6 +61,7 @@ impl<T> Mutex<T> {
     /// Lock the mutex by creating a FutureLock structs (private structure) and awaiting it.
     /// A successful FutureLock poll locks the atomic lock and returns a PseudoGuard used to access the resource
     pub fn lock(&self) -> FutureLock<T> {
+        println!("future_lock_new");
         FutureLock::new(self)
     }
 
@@ -69,6 +73,7 @@ impl<T> Mutex<T> {
     /// Attempt to lock a mutex by yielding thread. If it's take to much time, this function use default granularity time
     pub fn sync_lock(&self) -> LockGuard<T>
     {
+        println!("sync_lock");
         return self.sync_lock_with_time(DEFAULT_DURATION);
     }
 
@@ -76,7 +81,6 @@ impl<T> Mutex<T> {
     pub fn sync_lock_with_time(&self, wait_granularity : u64 ) -> LockGuard<T>
     {
         let mut i = 0;
-        // while self.bool_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
         while self.is_locked.load(Ordering::Acquire)
         {
             if i < DEFAULT_YIELD {
@@ -95,30 +99,49 @@ impl<T> Mutex<T> {
         !self.is_locked.load(Ordering::Acquire)
     }
 
-    /// Wait until the task hashmap is available, lock it, return mutable reference to it.
+    /// Unlock the mutex, start next Waker to attribute the resource if applicable
+    pub fn release(&self) -> ()
+     {
+        // Justification : same as insert_waker
+        let tasks: &mut HashMap<usize, Waker> = self.lock_tasks();
+        self.unlock_tasks();
+        self.is_locked.store(false,Ordering::Release);
+
+        if  let Some((idx, wk)) = tasks.into_iter().next() {
+            println!("Wake task {}", idx);
+            wk.clone().wake();
+        }
+        // if let Some(wk) = tasks.values().next() {
+        //     wk.clone().wake();
+        // }
+    }
+
+    // === Private function ===
+
+    /// Wait until the task hashmap is available, lock it, and then return mutable reference to it.
     /// On insertion lock to access the task map
-    fn wait_lock_task_hashmap(&self) -> &mut HashMap<usize,Waker>
+    fn lock_tasks(&self) -> &mut HashMap<usize,Waker>
     {
         unsafe
         {
             while self.can_insert.compare_exchange(true,false, Ordering::Acquire, Ordering::Relaxed).is_err() {
-                continue; }
+                std::thread::yield_now();
+                continue;
+            }
             &mut *self.tasks.get()
         }
-
     }
 
     /// Allow access to task hashmap.
-    fn unlock_task_hashmap(&self)
+    fn unlock_tasks(&self)
     {
         self.can_insert.store(true,Ordering::Relaxed);
     }
 
-    /// Pushes a Waker linked to a FutureLock to the front of the queue. Wakes it if it's the only one there, giving the resource to the task.
-    fn queue_waker(&self, wk: Waker) -> Option<usize> {
-
+    /// Pushes a Waker linked to a FutureLock to the waker buffer. Wakes it if it's the only one there, giving the resource to the task.
+    fn insert_waker(&self, wk: Waker) -> Option<usize> {
         //justification : multiple futurelocks share refs to self (have to be immutable) but each needs to mutate self to update queue
-        let tasks = self.wait_lock_task_hashmap();
+        let tasks: &mut HashMap<usize, Waker> = self.lock_tasks();
 
         //Generate a key associate to the waker
         let mut idx : usize = 0;
@@ -126,41 +149,33 @@ impl<T> Mutex<T> {
         {
             if !tasks.contains_key(&idx)
             {
-                if tasks.insert(idx, wk.clone()).is_some()
-                {
-                    // panic!("Key already exist, concurency race detected")
-                    return Option::None;
-                }
+                assert!(tasks.insert(idx, wk.clone()).is_some(), "Wake already inserted, concurency race detected");
+                // if tasks.insert(idx, wk.clone()).is_some()
+                // {
+                //     return Option::None;
+                // }
+                println!("mtx_insert_task {}", idx);
                 break;
             }
             idx += 1;
             if idx == usize::MAX {
+                self.unlock_tasks();
                 return Option::None; }
         }
         let r_idx: Option<usize> = Some(idx);
-
-        self.unlock_task_hashmap();
+        self.unlock_tasks();
 
         //Return key for inserted waker
         r_idx
     }
 
-
-    /// Unlock the mutex, start next Waker to attribute the resource if applicable
-    pub fn release(&self) -> ()
-     {
-        // Justification : same as queue_waker
-        self.wait_lock_task_hashmap();
-        unsafe
-        {
-            let taskref: &mut HashMap<usize,Waker> = &mut *self.tasks.get();
-            self.unlock_task_hashmap();
-            self.is_locked.store(false,Ordering::Release);
-
-            if let Some(wk) = taskref.values().next() {
-                wk.clone().wake();
-            }
-        }
+    /// Remove waker (if exist from the task list)
+    fn remove_waker(&self, idx : usize) {
+        let tasks: &mut HashMap<usize, Waker> = self.lock_tasks();
+        let pair: Option<Waker> = tasks.remove(&idx);
+        if pair.is_some() {
+            println!("mtx_remove_task {}", idx); }
+        self.unlock_tasks();
     }
 
 }
@@ -224,15 +239,13 @@ impl<'a, T> Future for FutureLock<'a, T> {
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         //check if locked by attempting to lock. if success return Pseudoguard
         if self.source.try_lock() {
-            let qref = self.source.wait_lock_task_hashmap();
-            let _pair: Option<Waker> = qref.remove(&self.wk_key.load(Ordering::Acquire));
-            self.source.unlock_task_hashmap();
+            self.source.remove_waker(self.wk_key.load(Ordering::Acquire));
             Poll::Ready(LockGuard::new(self.source))
         }
         else {
             //add context to queue if not already present for subsequent polls
             if !self.context_in_mtx.load(Ordering::Acquire) {
-                self.wk_key.store(self.source.queue_waker(cx.waker().clone()).unwrap(), Ordering::Release);
+                self.wk_key.store(self.source.insert_waker(cx.waker().clone()).unwrap(), Ordering::SeqCst);
                 self.context_in_mtx.store(true, Ordering::Release);
             }
             Poll::Pending
