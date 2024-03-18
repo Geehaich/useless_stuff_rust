@@ -25,7 +25,6 @@ const DEFAULT_DURATION : u64 = 10;
 pub struct Mutex<T> {
     is_locked: AtomicBool,
     can_insert: AtomicBool,
-    tasks: UnsafeCell<HashMap<usize,Waker>>,
     data: UnsafeCell<T>,
 }
 
@@ -45,7 +44,6 @@ impl<T> Mutex<T> {
         Mutex::<T> {
             is_locked: AtomicBool::new(false),    //resou
             can_insert: AtomicBool::new(true),    //deque access lockCell justified by need to mutate self across tasks through immutable references.
-            tasks : UnsafeCell::new(map),         //Map of task waiting the mutex
             data: UnsafeCell::<T>::new(resource), // Actual resource. UnsafeCell justified because Mozilla does it
         }
     }
@@ -61,9 +59,13 @@ impl<T> Mutex<T> {
     }
 
     /// Try to lock mutex
-    pub fn try_lock(&self) -> bool
+    pub fn try_lock(&self) -> Option<LockGuard<T>>
     {
-        self.is_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok()        
+        match self.is_locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        {
+            Ok(_) => Some(LockGuard::new(self)),
+            Err(_) => None
+        }
     }
 
     /// Attempt to lock a mutex by yielding thread. If it's take to much time, this function use default granularity time
@@ -95,76 +97,15 @@ impl<T> Mutex<T> {
         !self.is_locked.load(Ordering::Acquire)
     }
 
-    /// Wait until the task hashmap is available, lock it, return mutable reference to it.
-    /// On insertion lock to access the task map
-    fn wait_lock_task_hashmap(&self) -> &mut HashMap<usize,Waker>
-    {
-        unsafe
-        {
-            while self.can_insert.compare_exchange(true,false, Ordering::Acquire, Ordering::Relaxed).is_err() {
-                continue; }
-            &mut *self.tasks.get()
-        }
 
-    }
 
-    /// Allow access to task hashmap.
-    fn unlock_task_hashmap(&self)
-    {
-        self.can_insert.store(true,Ordering::Relaxed);
-    }
-
-    /// Pushes a Waker linked to a FutureLock to the front of the queue. Wakes it if it's the only one there, giving the resource to the task.
-    fn queue_waker(&self, wk: Waker) -> Option<usize> {
-
-        //justification : multiple futurelocks share refs to self (have to be immutable) but each needs to mutate self to update queue
-        let tasks = self.wait_lock_task_hashmap();
-
-        //Generate a key associate to the waker
-        let mut idx : usize = 0;
-        while idx < usize::MAX
-        {
-            if !tasks.contains_key(&idx) 
-            {
-                if tasks.insert(idx, wk.clone()).is_some()
-                {
-                    // panic!("Key already exist, concurency race detected")
-                    return Option::None;
-                }
-                break;
-            }
-            idx += 1;
-            if idx == usize::MAX {
-                return Option::None; }
-        }
-        let r_idx: Option<usize> = Some(idx);
-
-        self.unlock_task_hashmap();
-
-        //Return key for inserted waker
-        r_idx
-    }
 
 
     /// Unlock the mutex, start next Waker to attribute the resource if applicable
     pub fn release(&self) -> ()
      {
-        // Justification : same as queue_waker
-        self.wait_lock_task_hashmap();
-        unsafe 
-        {
-            let taskref: &mut HashMap<usize,Waker> = &mut *self.tasks.get();
-            
 
-        
-        self.unlock_task_hashmap();
         self.is_locked.store(false,Ordering::Release);
-
-        if let Some(wk) = taskref.values().next()
-            {
-                wk.clone().wake(); 
-            }
-        }
     }
 
 }
@@ -206,7 +147,6 @@ impl Error for LockError {
 /// and checking for the PseudoMutex lock on subsequent calls.
 pub struct FutureLock<'a, T> {
     source: &'a Mutex<T>,
-    context_in_mtx: AtomicBool,
     wk_key : AtomicUsize,
 }
 
@@ -215,7 +155,6 @@ impl<'a, T> FutureLock<'a, T> {
     fn new(_source: &'a Mutex<T>) -> FutureLock<'a, T> {
         FutureLock {
             source: _source,
-            context_in_mtx: AtomicBool::new(false),
             wk_key : AtomicUsize::new(usize::MAX)
         }
     }
@@ -225,22 +164,27 @@ impl<'a, T> Future for FutureLock<'a, T> {
     type Output = LockGuard<'a, T>;
 
     /// Try to periodicaly lock the mutex
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output>
+     {
         //check if locked by attempting to lock. if success return Pseudoguard
-        if self.source.try_lock() {
-            let qref = self.source.wait_lock_task_hashmap();
-            let _pair: Option<Waker> = qref.remove(&self.wk_key.load(Ordering::Acquire));
-            self.source.unlock_task_hashmap();
-            Poll::Ready(LockGuard::new(self.source))
-        }
-        else {
-            //add context to queue if not already present for subsequent polls
-            if !self.context_in_mtx.load(Ordering::Acquire) {
-                self.wk_key.store(self.source.queue_waker(cx.waker().clone()).unwrap(), Ordering::Release);
-                self.context_in_mtx.store(true, Ordering::Release);
+        
+        let lock_result = self.source.try_lock();
+
+        match lock_result
+        {
+            Some(guard) =>
+            {
+                Poll::Ready(guard)
+            },
+            None =>
+            {
+                //add context to queue if not already present for subsequent polls
+                cx.waker().clone().wake();
+                Poll::Pending
             }
-            Poll::Pending
         }
+        
+        
     }
 }
 

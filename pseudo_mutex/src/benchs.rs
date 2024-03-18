@@ -1,6 +1,7 @@
 use crate::Mutex;
 use futures::executor::block_on;
-use std::{sync::Arc, time::Duration};
+use rand::RngCore;
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 use futures_concurrency::prelude::*;
 
 pub mod async_timer {
@@ -48,129 +49,75 @@ pub mod async_timer {
     }
 }
 
-#[allow(dead_code)]
-/// Function called by every task in the queue
-async fn mut_work(m: Arc<Mutex<u32>>, wait: u64) {
-    //async_timer::AsyncTimeout::sleep_ms(wait + rand::random::<u64>() % 60).await;
+async fn mut_work(m : Arc<Mutex<(VecDeque<f32>,f32)>>,thread_index:u32)
+{
     let mut guard = m.lock().await;
 
-    *guard += rand::random::<u32>() % 10 + 1;
-    *guard %= 15000;
+
+    let mut mean_init =0.0;
+    for i in 0..guard.0.len() {mean_init += guard.0[i].log10();}
+    mean_init = mean_init / guard.0.len() as f32;
+
+    assert_eq!(mean_init, guard.1);
+
+    guard.0.push_back ( (rand::thread_rng().next_u32()%30 +1) as f32);
+    if guard.0.len()> 32 {guard.0.pop_front();}
+
+    let mut mean_end =0.0;
+    for i in 0..guard.0.len() {mean_end += guard.0[i].log10();}
+    mean_end = mean_end / guard.0.len() as f32;
+
+    guard.1 = mean_end;
+
 }
 
-#[allow(dead_code)]
-//equivalent to mut_work using OS mutexes
-async fn os_mut_work(m: Arc<std::sync::Mutex<u32>>, wait: u64) {
-    //async_timer::AsyncTimeout::sleep_ms(wait + rand::random::<u64>() % 60).await;
-    let mut guard = m.lock().unwrap();
-    *guard += rand::random::<u32>() % 10 + 1;
-    *guard %= 15000;
-}
+async fn as_main(metroid: Arc<Mutex<(VecDeque<f32>,f32)>>, n_tasks: u32, i:u32) {
 
-#[allow(dead_code)]
-/// asynchronous function spawning n_tasks asynchronous tasks
-async fn as_main(metroid: Arc<Mutex<u32>>, n_tasks: u32) {
     let mut futs = Vec::<_>::new();
-
-    for _i in 0..n_tasks {
-        futs.push(mut_work(metroid.clone(), 35));
-    }
-    futures::future::join_all(futs).await;
-}
-
-#[allow(dead_code)]
-// equivalent to as_main using OS mutexes instead of PseudoMutex instances
-async fn os_main(metroid: Arc<std::sync::Mutex<u32>>, n_tasks: u32) {
-    let mut futs = Vec::<_>::new();
-
-    for _i in 0..n_tasks {
-        futs.push(os_mut_work(metroid.clone(), 35));
-    }
-    futures::future::join_all(futs).await;
-}
-
-#[allow(dead_code)]
-// benchmark function. Takes a mutex owning a u32, increments it using asynchronous tasks across
-// multiple threads, and returns computation times of this task and an equivalent relying on OS mutexes.
-pub fn bench_as_vs_os(threads: u32, tasks: u32) -> (u128, u128) {
-    let mutax = Arc::new(Mutex::<u32>::new(0));
-    let mut handvec = Vec::<_>::new();
-
-    //Custom mutex
-    let a = std::time::Instant::now();
-    for _i in 0..threads {
-        let r: Arc<Mutex<u32>> = mutax.clone();
-        handvec.push(std::thread::spawn(move || block_on(as_main(r, tasks))));
-    }
-
-    for hand in handvec {
-        let _ = hand.join();
-    }
-
-    let as_time = a.elapsed().as_micros();
-
-    //OS mutex
-    let a = std::time::Instant::now();
-    let osax = Arc::new(std::sync::Mutex::<u32>::new(0));
-    let mut handvec = Vec::<_>::new();
-
-    for _i in 0..threads {
-        let r = osax.clone();
-        handvec.push(std::thread::spawn(move || block_on(os_main(r, tasks))));
-    }
-
-    for hand in handvec {
-        let _ = hand.join();
-    }
-
-    let os_time = a.elapsed().as_micros();
-
-    (as_time, os_time)
-}
-
-#[allow(dead_code)]
-pub fn bench_tasks_threads(threads: u32, tasks: u32) {
-    let mutax = Arc::new(Mutex::<u32>::new(0));
-    let mut handvec = Vec::<_>::new();
-
-    let _ = std::time::Instant::now();
-    for _i in 0..threads {
-        let r: Arc<Mutex<u32>> = mutax.clone();
-        handvec.push(std::thread::spawn(move || {
-            block_on(as_main(r, tasks))
-        }));
-    }
-
-    for hand in handvec {
-        let _ = hand.join();
-    }
-}
-
-// //benchmark things
-
-#[test]
-fn basic_funcs()
-{
-    for _i in 0..150
+    for _i in 0..n_tasks
     {
-    bench_tasks_threads(8, 200);
-    println!("{}",_i);
+        futs.push(mut_work(metroid.clone(),i));
     }
+    futures::future::join_all(futs).await;
 }
 
-#[test]
-fn single() {
-    let lim : u128 = 150;
-    let mut r : (u128,u128) = (0,0);
-    for i in 0..lim {
-        let t : (u128, u128) = bench_as_vs_os(8,200);
-        r.0 += t.0;
-        r.1 += t.1;
-        println!("Loop {} Crate: {}, OS {}; ", i, t.0, t.1);
+
+fn basic_test()
+{
+    let mut container_test = VecDeque::<f32>::with_capacity(16);
+    container_test.push_front(1.0);
+    let mut avg: f32 = 0.0;
+    let mut mut_deq = Arc::new(Mutex::new((container_test , avg)));
+
+    let mut handvec = Vec::<_>::new();
+
+    let N_THREADS = 16;
+    let N_TASKS = 400;
+    for i in 0..N_THREADS
+    {
+        let thread_ref = mut_deq.clone();
+        handvec.push(std::thread::spawn(move || block_on(as_main(thread_ref, N_TASKS,i))));
+
+    }
+    for hand in handvec 
+    {
+        let _ = hand.join();
     }
 
-    println!("Total - Crate: {} OS: {}", r.0 / lim, r.1 / lim)
+
 }
+
+#[tokio::test]
+async fn loop_basic()
+{
+    for i in 0..2000
+    {
+        basic_test();
+        println!("loop {}",i);
+    };
+}
+
+
 
 #[test]
 fn block_lock()  //test blocking access
@@ -195,31 +142,6 @@ fn block_lock()  //test blocking access
 }
 
 
-#[test]
-fn from_test() //test conversion from std mutex
-{
-    let mutex_os: std::sync::Mutex<u64>  = crate::Sync_Mutex::new(0);
-    let mutex_as : Mutex<u64> = Mutex::<u64>::from(mutex_os);
-    let marc = std::sync::Arc::new(mutex_as);
-
-    let mut handles
-     = vec![];
-
-    let n_threads = 80;
-    for i in 0..n_threads {
-        let data = std::sync::Arc::clone(&marc);
-        handles.push(std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(i*3^113)); //scrambles thread access order
-            let mut guard = data.sync_lock();
-            *guard += i;
-            println!("thread {} has mtx",i);
-            // the lock is unlocked here when `data` goes out of scope.
-        }));
-    }
-    for hand in handles {
-        _ = hand.join();
-    }
-}
 
 #[derive(Debug)]
 struct Schmilblick {
